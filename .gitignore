@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets & local
+.env
+*.pem
+partner_automation_config.json
+
+# Données générées
+output/
+logs/
+*.log
+sync_log.txt
+proofs/
+archive_chauffeurs_actifs/
+
+# Images & captures
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+debug_*.png
+login_err_*
+login_fail_*
+images-models/
+images_ocr/
+images_ocr.zip
+
+# Rapports & exports générés
+rapport_*.html
+*_rapport_*.html
+*.pdf
+fleet-drivers-*.csv
+manage-fleet*.csv
+matricules-blocked-*.txt
+transfer_list*
+call_list.csv
+*.xlsx
+*.xls
+*.csv
+!call_list_example.csv
+
+# SQL / dumps lourds
+*.sql
+
+# Archives & binaires
+*.zip
+*.apk
+*.mp3
+driver.apk
+
+# Scraping local
+partenaire_drivers_scrape/
+comment_guard/
+
+# IDE / OS
+.cursor/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# VPS — données Excel (scripts .py/.sh versionnés)
+vps_deploy/*.xlsx

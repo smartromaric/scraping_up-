@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UPJUNOO PRO — Dashboard Partenaires</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <div class="logo">UP<span>JUNOO</span> PRO</div>
+      <div class="header-meta" id="header-meta">Chargement…</div>
+    </div>
+    <div class="header-actions">
+      <select id="report-select" class="select-report" title="Export JSON à afficher"></select>
+      <button type="button" class="btn btn-outline" id="btn-refresh">Actualiser</button>
+      <button type="button" class="btn btn-gold" id="btn-nightly">Rapports du soir</button>
+      <button type="button" class="btn btn-outline" id="btn-orchestrator">Orchestrateur</button>
+    </div>
+  </header>
+
+  <div id="job-banner" class="job-banner" hidden>
+    <div class="job-banner-main">
+      <span class="job-banner-pulse" aria-hidden="true"></span>
+      <div>
+        <strong id="job-banner-title">Tâche en cours</strong>
+        <div id="job-banner-detail" class="job-banner-detail"></div>
+      </div>
+    </div>
+    <div class="job-banner-actions">
+      <div class="job-banner-progress">
+        <div class="job-banner-bar"><div id="job-banner-fill"></div></div>
+        <span id="job-banner-pct">0%</span>
+      </div>
+      <button type="button" class="btn btn-outline-dark btn-sm" id="btn-job-logs">Voir les logs</button>
+      <button type="button" class="btn btn-outline-dark btn-sm" id="btn-job-stop">Arrêter</button>
+    </div>
+  </div>
+
+  <main class="layout">
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab active" data-tab="overview">Vue globale</button>
+      <button type="button" class="tab" data-tab="campaigns">Campagnes</button>
+      <button type="button" class="tab" data-tab="runs">Exécution live <span id="tab-runs-badge" class="tab-badge" hidden>●</span></button>
+      <button type="button" class="tab" data-tab="exports">Exports HTML</button>
+    </nav>
+
+    <section id="panel-overview" class="panel active">
+      <div id="overview-warn" class="warn-banner" style="display:none;margin-bottom:16px"></div>
+      <div id="overview-empty" class="empty-msg" style="display:none">
+        Aucun export JSON. Lancez « Rapports du soir » ou un export manuel.
+      </div>
+      <div class="card" id="executive-summary-card" style="display:none">
+        <h2>Executive <span class="gold">Summary</span></h2>
+        <p class="sub" style="font-size:13px;color:var(--muted);margin:-8px 0 16px">
+          Synthèse direction — campagnes 1 à 20 (ou plage du rapport global HTML)
+        </p>
+        <div id="executive-summary" class="exec-summary-dash"></div>
+      </div>
+      <div id="overview-kpis" class="kpi-grid"></div>
+      <div class="chart-row" id="overview-charts"></div>
+      <div class="card">
+        <h2>Récapitulatif par <span class="gold">campagne</span></h2>
+        <div style="overflow-x:auto">
+          <table class="data-table" id="table-campaigns">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Partenaire</th>
+                <th>Véhicules</th>
+                <th>Approuvés</th>
+                <th>Conducteurs</th>
+                <th>Recharges</th>
+                <th>Taux flotte</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-campaigns" class="panel">
+      <div class="card">
+        <label for="campaign-select">Campagne :</label>
+        <select id="campaign-select" class="select-report" style="margin-left:8px"></select>
+      </div>
+      <div id="campaign-detail"></div>
+    </section>
+
+    <section id="panel-runs" class="panel">
+      <div class="run-panel">
+        <div class="card">
+          <h2>Exécution <span class="gold">en cours</span></h2>
+          <div class="progress-wrap">
+            <div class="progress-label">
+              <span id="run-phase">En attente</span>
+              <span id="run-pct">0%</span>
+            </div>
+            <div class="progress-bar">
+              <div class="progress-fill" id="run-progress"></div>
+            </div>
+          </div>
+          <p id="run-campaign" style="font-size:13px;color:var(--muted);margin-bottom:12px"></p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn btn-primary" id="btn-run-nightly">Lancer rapports du soir</button>
+            <button type="button" class="btn btn-outline-dark" id="btn-run-orch">Lancer orchestrateur</button>
+            <button type="button" class="btn btn-outline-dark" id="btn-run-html">HTML seulement</button>
+            <button type="button" class="btn btn-outline-dark" id="btn-stop" disabled>Arrêter</button>
+          </div>
+          <label class="checkbox-row" style="margin-top:12px">
+            <input type="checkbox" id="chk-headed" /> Navigateur visible (headed)
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="chk-zip" checked /> Créer ZIP par lot (global P01–P10 / P11–P20 + rapports campagne)
+          </label>
+          <div style="margin-top:8px">
+            <button type="button" class="btn btn-outline-dark" id="btn-run-zip">ZIP seulement</button>
+            <span style="font-size:12px;color:var(--muted);margin-left:8px">Depuis les HTML déjà générés</span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Planification <span class="gold" id="sched-time-display">17:00</span></h2>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
+            Extraction automatique quotidienne avec notification sonore à la fin.
+            Le serveur dashboard doit rester lancé à l'heure choisie.
+          </p>
+          <label class="checkbox-row">
+            <input type="checkbox" id="chk-auto" checked /> Activer l'extraction auto
+          </label>
+          <label style="font-size:13px;display:block;margin:8px 0">
+            Heure :
+            <input type="time" id="auto-time" value="17:00" style="margin-left:8px" />
+          </label>
+          <button type="button" class="btn btn-primary" id="btn-save-scheduler">Enregistrer</button>
+          <p id="scheduler-info" style="font-size:12px;color:var(--muted);margin-top:12px"></p>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Console <span class="gold">logs</span></h2>
+        <div class="log-console" id="log-console"></div>
+      </div>
+    </section>
+
+    <section id="panel-exports" class="panel">
+      <div class="card">
+        <h2>Rapports HTML <span class="gold">générés</span></h2>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
+          Ouvrir ou télécharger les rapports (même rendu que les emails ZIP).
+        </p>
+        <h3 style="font-size:14px;margin:12px 0 8px">Global</h3>
+        <ul id="list-global-html" style="list-style:none;font-size:14px"></ul>
+        <h3 style="font-size:14px;margin:16px 0 8px">Par campagne</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px" id="list-campaign-html"></div>
+        <h3 style="font-size:14px;margin:20px 0 8px">Archives ZIP <span class="gold">(lots)</span></h3>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+          Un ZIP par lot : rapport global du lot + P01…P10 (ou P11…P20), comme les pièces jointes email.
+        </p>
+        <ul id="list-zip-files" style="list-style:none;font-size:14px"></ul>
+
+        <h3 style="font-size:14px;margin:24px 0 8px">Chauffeurs actifs <span class="gold">(Excel)</span></h3>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Vue consolidée des chauffeurs <strong>assigned_approved</strong> : statut recharge F2000 et
+          présence en ligne (croisement export Godseye). Feuilles 1–10 et 11–20.
+        </p>
+        <div id="chauffeurs-actifs-status" class="chauffeurs-status" style="font-size:13px;margin-bottom:12px;color:var(--muted)">
+          Chargement…
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <button type="button" class="btn btn-outline-dark" id="btn-godseye-download">
+            Télécharger Godseye (en ligne)
+          </button>
+          <button type="button" class="btn btn-primary" id="btn-generate-chauffeurs">
+            Générer Excel
+          </button>
+          <a
+            class="btn btn-outline-dark"
+            id="link-chauffeurs-xlsx"
+            href="/api/chauffeurs-actifs/download"
+            style="text-decoration:none;display:none"
+          >
+            Télécharger Excel
+          </a>
+        </div>
+        <p style="font-size:11px;color:var(--muted);margin-top:10px">
+          Étape 1 : export admin (Selenium) → <code>drivers-godseye-*.xls</code>.
+          Étape 2 : génération depuis <code>state.json</code> (archive ZIP créée automatiquement).
+        </p>
+        <h4 style="font-size:13px;margin:16px 0 8px">Archives ZIP <span class="gold">chauffeurs actifs</span></h4>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+          Chaque génération produit un ZIP (Excel + manifest). Vous pouvez aussi regrouper tout l'historique horodaté.
+        </p>
+        <button type="button" class="btn btn-outline-dark btn-sm" id="btn-archive-chauffeurs-bundle">
+          Archiver tout l'historique
+        </button>
+        <ul id="list-chauffeurs-archives" style="list-style:none;font-size:14px;margin-top:12px"></ul>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

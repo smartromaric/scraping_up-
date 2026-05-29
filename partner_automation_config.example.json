@@ -1,0 +1,24 @@
+{
+  "_script": "partner_fleet_orchestrator.py",
+  "owner_login_url": "https://upjunoo-server-new.junooapps.com/login/owner-login",
+  "fleet_drivers_url": "https://upjunoo-server-new.junooapps.com/fleet-drivers",
+  "admin_base_url": "https://upjunoo-server-new.junooapps.com",
+  "partner_email_template": "campagne{index}@upjunoo.com",
+  "partner_password": "Upjunoo@Admin",
+  "drivers_per_partner": 10,
+  "transfer_amount": 2000,
+  "mobile": {
+    "appium_url": "http://127.0.0.1:4723",
+    "package": "com.upjunoo.driver",
+    "activity": ".MainActivity",
+    "apk": "driver.apk"
+  },
+  "partners_example": [
+    {
+      "index": 1,
+      "email": "campagne1@upjunoo.com",
+      "profile_uuid": "7764d7d4-536d-4f6d-afd9-6c8d7cffc616",
+      "name": "Campagne UPJUNOO 1"
+    }
+  ]
+}

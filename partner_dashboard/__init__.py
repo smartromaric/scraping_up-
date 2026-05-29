@@ -1,0 +1,1 @@
+"""Dashboard web partenaires UPJUNOO."""

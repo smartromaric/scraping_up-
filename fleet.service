@@ -1,0 +1,22 @@
+[Unit]
+Description=UpJunoo Fleet Creator - %i
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/upjunoo-scraper
+Environment="UPJUNOO_EMAIL=ton-email@example.com"
+Environment="UPJUNOO_PASSWORD=ton-password"
+Environment="WEBHOOK_URL=https://hooks.slack.com/services/..."
+Environment="PYTHONUNBUFFERED=1"
+
+# Remplace %i par le nom du partenaire quand tu lances: systemctl start fleet@Partenaire1
+ExecStart=/home/ubuntu/upjunoo-scraper/.venv/bin/python create_fleet_vps.py %i
+
+# Logs
+StandardOutput=append:/var/log/fleet-%i.log
+StandardError=append:/var/log/fleet-%i-error.log
+
+[Install]
+WantedBy=multi-user.target
