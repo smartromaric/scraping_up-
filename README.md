@@ -45,3 +45,42 @@ Après les rapports HTML, le runner crée un ZIP par lot dans `output/partner_au
 - `rapport_soir_P11_P20_*.zip` — global du lot + `P11`…`P20`
 
 Dashboard : cocher **Créer ZIP par lot** ou **ZIP seulement** (HTML déjà présents). Téléchargement dans l’onglet **Exports HTML**.
+
+## Déploiement VPS
+
+Sur le serveur (ex. port **8770**, écoute `0.0.0.0`) :
+
+```bash
+git clone https://github.com/smartromaric/scraping_up-.git /opt/scraping_up-
+cd /opt/scraping_up-
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-partner-dashboard.txt -r requirements.txt
+cp .env.example .env   # UPJUNOO_EMAIL / UPJUNOO_PASSWORD
+mkdir -p output/partner_automation
+# Copier state.json depuis votre machine si vous en avez déjà un :
+# scp output/partner_automation/state.json root@VPS:/opt/scraping_up-/output/partner_automation/
+
+bash deploy/install_dashboard_vps.sh
+```
+
+Ou manuellement :
+
+```bash
+export PARTNER_DASHBOARD_HOST=0.0.0.0
+export PARTNER_DASHBOARD_PORT=8770
+.venv/bin/python run_partner_dashboard.py
+```
+
+Pare-feu :
+
+```bash
+ufw allow 8770/tcp
+ufw status
+```
+
+Service systemd : `deploy/partner-dashboard.service` — commandes utiles :
+
+```bash
+systemctl restart partner-dashboard
+journalctl -u partner-dashboard -f
+```

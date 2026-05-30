@@ -231,29 +231,41 @@ def log_campaign_plan(partners: list[dict[str, Any]], *, start: int, end: int) -
         log(f"      [{p['index']:>2}] {p.get('name', '')} | {mask} ({src})")
 
 
+def _normalize_ui_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def _is_empty_data_message(text: str) -> bool:
+    """Message DataTables « vraiment vide » (pas confondre avec 10 entrées / 500 entrées)."""
+    low = _normalize_ui_text(text)
+    if not low:
+        return False
+    if re.search(r"aucune\s+donn[eé]e\s+trouv[eé]e", low):
+        return True
+    if re.search(r"no\s+(matching\s+)?records?\s+found", low):
+        return True
+    if re.search(r"affichage\s+0\s+de\s+0", low):
+        return True
+    if re.search(r"affichage\s+(?:\d+\s+[àa]\s+)?0\s+de\s+0\s+entr", low):
+        return True
+    return False
+
+
 def _is_placeholder_row(row: Any) -> bool:
     try:
-        txt = (row.text or "").strip().lower()
+        txt = (row.text or "").strip()
         if not txt:
             return True
-        if any(
-            w in txt
-            for w in (
-                "chargement",
-                "loading",
-                "aucune donnée",
-                "aucune donnee",
-                "no data",
-                "no records",
-                "affichage 0 de 0",
-                "0 de 0 entrée",
-                "0 entrées",
-            )
-        ):
+        if _is_empty_data_message(txt):
+            return True
+        low = txt.lower()
+        if any(w in low for w in ("chargement", "loading")):
             return True
         cells = row.find_elements(By.TAG_NAME, "td")
         if len(cells) == 1 and (cells[0].get_attribute("colspan") or "").strip():
-            return True
+            cell_txt = (cells[0].text or "").strip()
+            if _is_empty_data_message(cell_txt) or not cell_txt:
+                return True
         if len(cells) < 3:
             return True
         if not any((c.text or "").strip() not in ("", "-", "—", "N/A") for c in cells):
@@ -266,16 +278,41 @@ def _is_placeholder_row(row: Any) -> bool:
     return False
 
 
-_EMPTY_TAB_MARKERS = (
-    "aucune donnée",
-    "aucune donnee",
-    "no data",
-    "no records",
-    "affichage 0 de 0",
-    "0 de 0 entrée",
-    "0 entrées",
-    "affichage à de 0",
-)
+FLEET_RETRY_MAX = 3
+FLEET_SUSPECT_PROFILE_RELOADS = 2
+
+
+def _valid_data_rows_in_pane(pane) -> int:
+    """Compte les lignes tbody réelles (hors en-tête / « Aucune donnée trouvée »)."""
+    n = 0
+    for row in pane.find_elements(By.CSS_SELECTOR, "table tbody tr"):
+        if _is_placeholder_row(row):
+            continue
+        cells = row.find_elements(By.TAG_NAME, "td")
+        if len(cells) >= 2 and any((c.text or "").strip() for c in cells):
+            n += 1
+    return n
+
+
+def _pane_has_empty_data_row(pane) -> bool:
+    """Une ligne unique « Aucune donnée trouvée » dans tbody."""
+    rows = pane.find_elements(By.CSS_SELECTOR, "table tbody tr")
+    if not rows:
+        return False
+    for row in rows:
+        txt = (row.text or "").strip()
+        if _is_empty_data_message(txt):
+            return True
+        cells = row.find_elements(By.TAG_NAME, "td")
+        if len(cells) == 1:
+            if _is_empty_data_message((cells[0].text or "").strip()):
+                return True
+    return False
+
+
+def _pane_text_confirms_empty(txt: str) -> bool:
+    """Texte du panneau confirme un tableau vide réel (strict)."""
+    return _is_empty_data_message(txt)
 
 
 def _get_active_tab_pane(driver: webdriver.Chrome):
@@ -295,17 +332,23 @@ def _get_active_tab_pane(driver: webdriver.Chrome):
 
 
 def _active_tab_has_no_data(driver: webdriver.Chrome) -> bool:
+    """
+    True seulement si le vide est confirmé (« Aucune donnée trouvée », affichage 0 de 0).
+    Sinon False → on tente quand même le parse (évite les faux vides).
+    """
     pane = _get_active_tab_pane(driver)
     if not pane:
         return False
-    txt = (pane.text or "").lower()
-    if any(m in txt for m in _EMPTY_TAB_MARKERS):
+    if _valid_data_rows_in_pane(pane) > 0:
+        return False
+    if _pane_has_empty_data_row(pane):
         return True
-    if re.search(r"affichage\s+0\s+de\s+0", txt):
-        return True
-    if re.search(r"affichage\s+[^\n]{0,40}\s+0\s+entr", txt):
-        return True
-    return False
+    return _pane_text_confirms_empty(pane.text or "")
+
+
+def fleet_tab_confirmed_empty(driver: webdriver.Chrome) -> bool:
+    """Indique si l'onglet flotte affiche un vide réel UpJunoo."""
+    return _active_tab_has_no_data(driver)
 
 
 def _get_active_table_rows(driver: webdriver.Chrome) -> list[Any]:
@@ -322,16 +365,148 @@ def _get_active_table_rows(driver: webdriver.Chrome) -> list[Any]:
 
 
 def wait_for_tab_table(driver: webdriver.Chrome, timeout: int = 30) -> bool:
-    """Attend données ou état vide dans l'onglet actif du profil partenaire."""
+    """Attend données ou état vide stable dans l'onglet actif du profil partenaire."""
     end = time.time() + timeout
+    empty_streak = 0
     while time.time() < end:
-        if _active_tab_has_no_data(driver):
+        pane = _get_active_tab_pane(driver)
+        if pane and _valid_data_rows_in_pane(pane) > 0:
             return True
-        for row in _get_active_table_rows(driver):
-            if not _is_placeholder_row(row):
+        if _active_tab_has_no_data(driver):
+            empty_streak += 1
+            if empty_streak >= 3:
                 return True
+        else:
+            empty_streak = 0
         time.sleep(0.5)
     return _active_tab_has_no_data(driver)
+
+
+def is_fleet_scrape_suspect(record: dict[str, Any]) -> bool:
+    """
+    0 véhicule + chauffeurs présents sans message « Aucune donnée trouvée »
+    → probable faux négatif (bug timing / parse).
+    """
+    if record.get("fleet_confirmed_empty"):
+        return False
+    return int(record.get("vehicles_count") or 0) == 0 and int(record.get("drivers_count") or 0) > 0
+
+
+def scrape_fleet_vehicles(
+    driver: webdriver.Chrome,
+    *,
+    max_attempts: int = FLEET_RETRY_MAX,
+) -> tuple[list[dict[str, str]], list[str], bool]:
+    """Ouvre l'onglet flotte et parse les véhicules (plusieurs essais)."""
+    errors: list[str] = []
+    vehicles: list[dict[str, str]] = []
+    confirmed_empty = False
+    for attempt in range(1, max_attempts + 1):
+        if not open_fleet_tab(driver):
+            errors.append("fleet_tab_failed")
+            if attempt < max_attempts:
+                log(f"   Flotte : onglet inaccessible — essai {attempt + 1}/{max_attempts}", "WARNING")
+                time.sleep(2.5)
+            continue
+        if fleet_tab_confirmed_empty(driver):
+            confirmed_empty = True
+            log("   Flotte : « Aucune donnée trouvée » — vide réel confirmé", "OK")
+            return [], errors, True
+        vehicles = parse_fleet_detail_rows(driver)
+        if vehicles:
+            if attempt > 1:
+                log(
+                    f"   ✓ Flotte récupérée (essai {attempt}/{max_attempts}) — {len(vehicles)} véhicule(s)",
+                    "OK",
+                )
+            return vehicles, errors, False
+        if fleet_tab_confirmed_empty(driver):
+            confirmed_empty = True
+            log("   Flotte : « Aucune donnée trouvée » — vide réel confirmé", "OK")
+            return [], errors, True
+        if attempt < max_attempts:
+            log(
+                f"   Flotte : 0 ligne sans message vide (essai {attempt}/{max_attempts}) — retry…",
+                "WARNING",
+            )
+            time.sleep(2.5)
+    return vehicles, errors, confirmed_empty
+
+
+def retry_fleet_if_suspect(
+    driver: webdriver.Chrome,
+    partner: dict[str, Any],
+    record: dict[str, Any],
+) -> None:
+    """Re-scrape flotte si 0 véh. alors que des chauffeurs existent."""
+    if not is_fleet_scrape_suspect(record):
+        return
+    idx = partner.get("index")
+    log(
+        f"   ⚠ Campagne {idx} suspecte : 0 véh. / {record['drivers_count']} chauf. — retry flotte",
+        "WARNING",
+    )
+    for reload in range(1, FLEET_SUSPECT_PROFILE_RELOADS + 1):
+        if partner.get("profile_uuid"):
+            open_partner_profile_by_uuid(driver, str(partner["profile_uuid"]))
+            time.sleep(2)
+        vehicles, errs = scrape_fleet_vehicles(driver, max_attempts=FLEET_RETRY_MAX)
+        for e in errs:
+            if e not in record["errors"]:
+                record["errors"].append(e)
+        if vehicles:
+            record["vehicles"] = vehicles
+            record["vehicles_count"] = len(vehicles)
+            record["fleet_confirmed_empty"] = False
+            if "fleet_suspect_empty" in record["errors"]:
+                record["errors"].remove("fleet_suspect_empty")
+            log(f"   ✓ Flotte corrigée après retry : {len(vehicles)} véhicule(s)", "OK")
+            attach_status_breakdown(record)
+            return
+        if fleet_tab_confirmed_empty(driver):
+            record["fleet_confirmed_empty"] = True
+            if "fleet_suspect_empty" in record["errors"]:
+                record["errors"].remove("fleet_suspect_empty")
+            log("   Flotte vide réelle confirmée au retry — pas d'erreur", "OK")
+            attach_status_breakdown(record)
+            return
+        log(f"   Retry flotte {reload}/{FLEET_SUSPECT_PROFILE_RELOADS} — toujours vide", "WARNING")
+    if "fleet_suspect_empty" not in record["errors"]:
+        record["errors"].append("fleet_suspect_empty")
+    attach_status_breakdown(record)
+
+
+def list_suspect_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in records if is_fleet_scrape_suspect(r)]
+
+
+def validate_and_rescrape_suspects(
+    driver: webdriver.Chrome,
+    partners: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> int:
+    """Validation finale : re-scrape flotte pour les campagnes suspectes."""
+    by_idx = {int(p.get("index") or 0): p for p in partners}
+    fixed = 0
+    for record in list(records):
+        if not is_fleet_scrape_suspect(record):
+            continue
+        idx = int(record.get("index") or 0)
+        partner = by_idx.get(idx)
+        if not partner:
+            continue
+        log(f"\n── Validation : re-scrape flotte campagne {idx} ──")
+        before = record["vehicles_count"]
+        retry_fleet_if_suspect(driver, partner, record)
+        if record["vehicles_count"] > before:
+            fixed += 1
+    remaining = list_suspect_records(records)
+    if remaining:
+        ids = ", ".join(f"P{int(r['index']):02d}" for r in remaining)
+        log(f"   ⚠ Campagnes encore suspectes après validation : {ids}", "WARNING")
+    else:
+        log("   ✓ Validation flotte : aucune campagne suspecte restante", "OK")
+    return fixed
 
 
 def set_page_size(
@@ -1010,6 +1185,7 @@ def scrape_partner_report(
         "vehicles": [],
         "drivers": [],
         "errors": [],
+        "fleet_confirmed_empty": False,
         "scraped_at": scraped_at,
     }
 
@@ -1048,12 +1224,13 @@ def scrape_partner_report(
         driver, partner=partner, slot_pos=slot_pos, total_slots=total_slots,
         step="3/4 FLOTTE", detail="véhicules", color=VIS_ORANGE, show_ui=show_ui,
     )
-    if not open_fleet_tab(driver):
-        record["errors"].append("fleet_tab_failed")
-        log("   Onglet flotte inaccessible", "WARNING")
-    else:
-        record["vehicles"] = parse_fleet_detail_rows(driver)
-        record["vehicles_count"] = len(record["vehicles"])
+    vehicles, fleet_errs, fleet_empty = scrape_fleet_vehicles(driver)
+    record["vehicles"] = vehicles
+    record["vehicles_count"] = len(vehicles)
+    record["fleet_confirmed_empty"] = fleet_empty
+    for e in fleet_errs:
+        if e not in record["errors"]:
+            record["errors"].append(e)
 
     show_phase_ui(
         driver, partner=partner, slot_pos=slot_pos, total_slots=total_slots,
@@ -1065,6 +1242,8 @@ def scrape_partner_report(
     else:
         record["drivers"] = parse_driver_detail_rows(driver)
         record["drivers_count"] = len(record["drivers"])
+
+    retry_fleet_if_suspect(driver, partner, record)
 
     attach_status_breakdown(record)
     log(f"   {record['vehicles_count']} véhicule(s) — {format_status_breakdown(record['vehicles_by_status'])}")
@@ -1273,6 +1452,14 @@ def main() -> None:
                     "scraped_at": datetime.now().isoformat(timespec="seconds"),
                 })
 
+        suspects_before = list_suspect_records(records)
+        if suspects_before:
+            log(
+                f"\nValidation post-export : {len(suspects_before)} campagne(s) suspecte(s)",
+                "WARNING",
+            )
+            validate_and_rescrape_suspects(driver, partners, records)
+
         report = build_report(records)
         export_json(report, json_path)
         export_excel(report, xlsx_path)
@@ -1297,6 +1484,13 @@ def main() -> None:
         )
         log(f"   Véhicules (global) : {format_status_breakdown(report['totals'].get('vehicles_by_status') or {})}")
         log(f"   Chauffeurs (global) : {format_status_breakdown(report['totals'].get('drivers_by_status') or {})}")
+        final_suspects = list_suspect_records(records)
+        if final_suspects:
+            log(
+                f"   ⚠ ATTENTION : {len(final_suspects)} campagne(s) avec 0 véh. et des chauffeurs : "
+                + ", ".join(f"P{int(r['index']):02d}" for r in final_suspects),
+                "WARNING",
+            )
         log(f"   JSON: {json_path}")
         log(f"   Excel: {xlsx_path}")
 

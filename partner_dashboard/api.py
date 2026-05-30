@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -37,6 +37,22 @@ from partner_dashboard.metrics import (
     find_best_export_json,
     list_export_reports,
     load_report,
+)
+from partner_dashboard.recharge_service import (
+    compare_states,
+    export_recharge_csv_rows,
+    export_state_timestamped,
+    is_valid_state_upload_filename,
+    list_drivers_filtered,
+    list_partners_for_filter,
+    list_partners_pending,
+    list_to_recharge,
+    load_state_dict,
+    mark_drivers_recharged,
+    merge_uploaded_into_current,
+    parse_uploaded_state,
+    recharge_summary,
+    state_export_filename,
 )
 from partner_dashboard.run_manager import run_manager
 from partner_dashboard.scheduler import auto_scheduler
@@ -97,6 +113,13 @@ class OrchestratorRunBody(BaseModel):
 
 class GodseyeRunBody(BaseModel):
     headed: bool = False
+
+
+class MarkRechargedBody(BaseModel):
+    match_keys: list[str] = Field(default_factory=list)
+    phones: list[str] = Field(default_factory=list)
+    partner_index: int | None = Field(None, ge=1, le=20)
+    all_pending_in_partner: bool = False
 
 
 class SchedulerBody(BaseModel):
@@ -249,6 +272,158 @@ def run_orchestrator(body: OrchestratorRunBody) -> dict[str, Any]:
         start=body.start,
         end=body.end,
     )
+
+
+@app.get("/api/recharges")
+def recharges_list(
+    view: str = Query(
+        "to_recharge",
+        description="to_recharge | all | recharged | actifs | non_assignes",
+    ),
+    partner_index: int | None = Query(None, ge=1, le=20),
+) -> dict[str, Any]:
+    allowed_views = ("to_recharge", "all", "recharged", "actifs", "non_assignes")
+    if view not in allowed_views:
+        raise HTTPException(400, f"view invalide — valeurs: {', '.join(allowed_views)}")
+    if not STATE_FILE.is_file():
+        return {
+            "ok": True,
+            "state_exists": False,
+            "state_path": str(STATE_FILE),
+            "view": view,
+            "partner_index": partner_index,
+            "export_filename_example": state_export_filename(),
+            "summary": {
+                "drivers_total": 0,
+                "actifs": 0,
+                "non_assignes": 0,
+                "recharges": 0,
+                "a_recharger": 0,
+                "invalid_phone": 0,
+            },
+            "partners_pending": [],
+            "partners": [],
+            "drivers": [],
+            "drivers_count": 0,
+        }
+    state = load_state_dict(STATE_FILE)
+    drivers = list_drivers_filtered(state, view=view, partner_index=partner_index)
+    return {
+        "ok": True,
+        "state_exists": True,
+        "state_path": str(STATE_FILE.resolve()),
+        "view": view,
+        "partner_index": partner_index,
+        "export_filename_example": state_export_filename(),
+        "summary": recharge_summary(state),
+        "partners_pending": list_partners_pending(state),
+        "partners": list_partners_for_filter(state),
+        "drivers": drivers,
+        "drivers_count": len(drivers),
+    }
+
+
+@app.get("/api/recharges/export-state")
+def recharges_export_state() -> FileResponse:
+    try:
+        path, filename = export_state_timestamped()
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    return FileResponse(
+        path,
+        media_type="application/json",
+        filename=filename,
+    )
+
+
+@app.post("/api/recharges/mark")
+def recharges_mark(body: MarkRechargedBody) -> dict[str, Any]:
+    try:
+        result = mark_drivers_recharged(
+            match_keys=body.match_keys,
+            phones=body.phones,
+            partner_index=body.partner_index,
+            all_pending_in_partner=body.all_pending_in_partner,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    result["ok"] = True
+    return result
+
+
+@app.get("/api/recharges/export-csv")
+def recharges_export_csv() -> FileResponse:
+    if not STATE_FILE.is_file():
+        raise HTTPException(404, "state.json introuvable.")
+    import csv
+    import io
+
+    state = load_state_dict(STATE_FILE)
+    rows = export_recharge_csv_rows(state)
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=["numero", "montant", "name", "campagne", "statut"],
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    out_path = OUTPUT_DIR / "chauffeurs_a_recharger_dashboard.csv"
+    out_path.write_text(buf.getvalue(), encoding="utf-8-sig")
+    return FileResponse(
+        out_path,
+        media_type="text/csv; charset=utf-8",
+        filename="chauffeurs_a_recharger_appium.csv",
+    )
+
+
+@app.post("/api/recharges/compare")
+async def recharges_compare(file: UploadFile = File(...)) -> dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(400, "Aucun fichier sélectionné.")
+    if not is_valid_state_upload_filename(file.filename):
+        raise HTTPException(
+            400,
+            "Nom attendu : state.json, state (1).json, state_20260529_143052.json, etc.",
+        )
+    try:
+        raw = await file.read()
+        uploaded = parse_uploaded_state(raw, file.filename)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    current = load_state_dict(STATE_FILE) if STATE_FILE.is_file() else {"version": 1, "partners": {}}
+    result = compare_states(current, uploaded)
+    result["ok"] = True
+    result["uploaded_filename"] = file.filename
+    return result
+
+
+@app.post("/api/recharges/apply")
+async def recharges_apply(file: UploadFile = File(...)) -> dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(400, "Aucun fichier sélectionné.")
+    if not is_valid_state_upload_filename(file.filename):
+        raise HTTPException(
+            400,
+            "Nom attendu : state.json, state (1).json, state_20260529_143052.json, etc.",
+        )
+    try:
+        raw = await file.read()
+        uploaded = parse_uploaded_state(raw, file.filename)
+        result = merge_uploaded_into_current(
+            uploaded,
+            backup=True,
+            uploaded_filename=file.filename,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, f"Fusion échouée: {e}") from e
+    result["ok"] = True
+    result["uploaded_filename"] = file.filename
+    return result
 
 
 @app.get("/api/chauffeurs-actifs/status")

@@ -5,7 +5,7 @@ partner_fleet_orchestrator.py
 
 Automatisation web multi-partenaires (1 navigateur, boucle temps réel) :
 
-  Phase A — Compte partenaire : owner-login → fleet-drivers → 10 premiers chauffeurs
+  Phase A — Compte partenaire : owner-login → fleet-drivers → tous les chauffeurs visibles (pagination 500)
   Phase B — Admin : manage-owners → profil → Détails de la flotte → vérif assignation + pastilles
 
 Registre : output/partner_automation/state.json (fusion à chaque tour — ne supprime pas transfer_2000_done)
@@ -76,7 +76,8 @@ DEFAULT_PARTNER_PASSWORD = os.getenv("PARTNER_PASSWORD", "123456789@")
 ADMIN_EMAIL = os.getenv("UPJUNOO_EMAIL", "admin@upjunoo.com")
 ADMIN_PASSWORD = os.getenv("UPJUNOO_PASSWORD", "Upjunoo@Admin")
 
-DRIVERS_TOP_N = 10
+FLEET_DRIVERS_PAGE_SIZE = 500
+DRIVERS_TOP_N = 500  # max chauffeurs lus sur fleet-drivers (--top pour réduire en test)
 
 # Indicateurs visuels (bordures + pastilles)
 VIS_GREEN = "#2e7d32"
@@ -391,44 +392,211 @@ def _owner_status_style(row_text: str) -> tuple[str, str]:
     return VIS_GRAY, "?"
 
 
+def _find_pagination_select(driver: webdriver.Chrome) -> Any | None:
+    """Select DataTables — même ordre que scrape_owner_drivers_vps / quick_approve."""
+    css_list = (
+        "select.form-select.form-select-sm.w-auto",
+        "select[name='DataTables_Table_0_length']",
+        "select[data-dt-idx='0']",
+        "select[name*='length']",
+        ".dataTables_length select",
+        "select.form-select-sm",
+        "select.form-select",
+    )
+    for css in css_list:
+        try:
+            el = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, css)),
+            )
+            if el.is_displayed() and len(el.find_elements(By.TAG_NAME, "option")) >= 2:
+                return el
+        except Exception:
+            continue
+    return None
+
+
 def set_page_size(driver: webdriver.Chrome, size: int = 500) -> bool:
-    """Pagination DataTables — sans planter si le select est vide / caché."""
-    try:
-        time.sleep(1.0)
-        selects = driver.find_elements(
-            By.CSS_SELECTOR,
-            "select.form-select-sm, select[name*='length'], .dataTables_length select, select.form-select",
-        )
-        for el in selects:
-            try:
-                if not el.is_displayed():
-                    continue
-                s = Select(el)
-                opts = [o for o in s.options if (o.get_attribute("value") or "").strip() != ""]
-                if not opts:
-                    continue
-                values = [o.get_attribute("value") for o in opts]
-                texts = [(o.text or "").strip() for o in opts]
-                target = str(size)
-                if target in values:
-                    s.select_by_value(target)
-                else:
-                    for pref in (str(size), "100", "50", "25", "10", "All", "Tout"):
-                        if pref in texts:
-                            s.select_by_visible_text(pref)
-                            break
-                    else:
-                        s.select_by_index(len(opts) - 1)
-                log(f"   [PAGE] Pagination → {s.first_selected_option.text.strip()}", "OK")
-                time.sleep(2.5)
-                wait_for_table(driver, timeout=30, min_rows=1)
-                return True
-            except Exception:
+    """Pagination DataTables — select w-auto + dispatch change (comme les autres scripts)."""
+    for attempt in range(1, 4):
+        try:
+            log(f"   [PAGE] Pagination {size} — tentative {attempt}/3")
+            sel_el = _find_pagination_select(driver)
+            if not sel_el:
+                log("   [PAGE] Select pagination introuvable", "WARNING")
+                time.sleep(2)
                 continue
+
+            chosen = driver.execute_script(
+                """
+                var select = arguments[0], target = String(arguments[1]), found = false, chosen = '';
+                for (var i = 0; i < select.options.length; i++) {
+                    var v = (select.options[i].value || '').trim();
+                    var t = (select.options[i].text || '').trim();
+                    if (v === target || t === target || t.indexOf(target) >= 0) {
+                        select.selectedIndex = i; found = true; break;
+                    }
+                }
+                if (!found) {
+                    for (var j = select.options.length - 1; j >= 0; j--) {
+                        var tv = (select.options[j].value || '').trim();
+                        if (tv && tv !== '-1') { select.selectedIndex = j; found = true; break; }
+                    }
+                }
+                chosen = select.options[select.selectedIndex].text.trim()
+                    || select.options[select.selectedIndex].value;
+                var setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLSelectElement.prototype, 'value'
+                ).set;
+                setter.call(select, select.options[select.selectedIndex].value);
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+                if (window.jQuery) { window.jQuery(select).trigger('change'); }
+                return chosen;
+                """,
+                sel_el,
+                str(size),
+            )
+            log(f"   [PAGE] Pagination → {chosen}", "OK")
+            time.sleep(2)
+
+            start = time.time()
+            last_count = -1
+            stable = 0
+            while time.time() - start < 45:
+                count = len(driver.find_elements(By.CSS_SELECTOR, "table tbody tr"))
+                if count == last_count and count > 0:
+                    stable += 1
+                    if stable >= 3:
+                        log(f"   [PAGE] Tableau stable — {count} ligne(s)", "OK")
+                        return True
+                else:
+                    stable = 0
+                last_count = count
+                time.sleep(1)
+            if last_count > 0:
+                log(f"   [PAGE] {last_count} ligne(s) chargée(s)", "OK")
+                return True
+        except Exception as e:
+            log(f"   [PAGE] Erreur tentative {attempt}: {e}", "WARNING")
+        if attempt < 3:
+            try:
+                driver.refresh()
+                time.sleep(3)
+                wait_for_table(driver, timeout=30, min_rows=1)
+            except Exception:
+                pass
+    return False
+
+
+def _fleet_first_row_sig(driver: webdriver.Chrome) -> str | None:
+    try:
+        rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+        return (rows[0].text or "")[:200] if rows else None
+    except Exception:
+        return None
+
+
+def _fleet_go_next_page(driver: webdriver.Chrome) -> bool:
+    """Page suivante Bootstrap — fallback si pagination 500 indisponible."""
+    try:
+        driver.find_element(
+            By.CSS_SELECTOR,
+            "ul.pagination li.page-item.disabled a.page-link[aria-label='Next']",
+        )
         return False
-    except Exception as e:
-        log(f"   Pagination: {e}", "WARNING")
+    except Exception:
+        pass
+    try:
+        btn = driver.find_element(
+            By.CSS_SELECTOR,
+            "ul.pagination li.page-item:not(.disabled) a.page-link[aria-label='Next']",
+        )
+        if not btn.is_displayed():
+            return False
+        prev = _fleet_first_row_sig(driver)
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+        time.sleep(0.3)
+        try:
+            btn.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", btn)
+        start = time.time()
+        while time.time() - start < 15:
+            time.sleep(0.5)
+            new_sig = _fleet_first_row_sig(driver)
+            if new_sig and new_sig != prev:
+                time.sleep(1)
+                return True
         return False
+    except Exception:
+        return False
+
+
+def _parse_fleet_driver_rows(
+    driver: webdriver.Chrome,
+    *,
+    col: dict[str, int],
+    top_n: int,
+    drivers: list[dict[str, str]],
+    seen: set[str],
+    visual: bool,
+) -> int:
+    """Parse les lignes visibles ; retourne le nombre de nouveaux chauffeurs ajoutés."""
+    name_i = col.get("name", 0)
+    phone_i = col.get("phone", 3)
+    veh_i = col.get("vehicle_type")
+    added = 0
+    rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+    for row in rows:
+        if len(drivers) >= top_n:
+            break
+        if _is_placeholder_row(row):
+            continue
+        try:
+            cells = row.find_elements(By.TAG_NAME, "td")
+            name = _cell_text(cells, name_i)
+            if not name or len(name) < 2:
+                continue
+            phone = _cell_text(cells, phone_i)
+            if not normalize_phone(phone):
+                for idx in range(len(cells)):
+                    t = _cell_text(cells, idx)
+                    if normalize_phone(t):
+                        phone = t
+                        break
+            dedupe_key = normalize_phone(phone) or normalize_text(name)
+            if dedupe_key in seen:
+                continue
+            vehicle_type = _cell_text(cells, veh_i) if veh_i is not None else ""
+            row_txt = row.text or ""
+            status_i = col.get("status")
+            status_cell = _cell_text(cells, status_i) if status_i is not None else ""
+            if status_cell:
+                owner_status = status_cell
+            else:
+                owner_status = (
+                    "APPROUVÉ" if "APPROUV" in row_txt.upper()
+                    else "EN ATTENTE" if "ATTENTE" in row_txt.upper()
+                    else "DÉSAPPROUVÉ" if "DESAPPROUV" in row_txt.upper() or "DÉSAPPROUV" in row_txt
+                    else "?"
+                )
+            color, label = _owner_status_style(row_txt)
+            if visual:
+                highlight_row(driver, row, color, label[:12])
+            drivers.append(
+                {
+                    "name": name,
+                    "phone": phone,
+                    "vehicle_type": vehicle_type,
+                    "owner_status": owner_status,
+                    "scraped_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+            seen.add(dedupe_key)
+            added += 1
+            log(f"      → {name} | {phone or '-'} | {owner_status} | véh.={vehicle_type or '-'}")
+        except Exception as e:
+            log(f"   [OWNER] Ligne ignorée: {e}", "WARNING")
+    return added
 
 
 def try_search(driver: webdriver.Chrome, query: str) -> bool:
@@ -895,69 +1063,43 @@ def scrape_fleet_drivers_top(
         log("   [OWNER] Tableau fleet-drivers vide / lent — retry sans pagination", "WARNING")
         time.sleep(3)
 
-    # Pagination optionnelle (ne doit pas bloquer le scrape)
-    if not set_page_size(driver, 10):
-        log("   [OWNER] Pagination ignorée (on garde les lignes visibles)", "WARNING")
+    if not set_page_size(driver, FLEET_DRIVERS_PAGE_SIZE):
+        log(
+            f"   [OWNER] Pagination {FLEET_DRIVERS_PAGE_SIZE} indisponible — scan page par page",
+            "WARNING",
+        )
 
-    wait_for_table(driver, timeout=20, min_rows=1)
+    wait_for_table(driver, timeout=30, min_rows=1)
+    stable_rows = wait_table_row_count_stable(driver, checks=3, pause_s=1.5)
+    if stable_rows > 0:
+        log(f"   [OWNER] Tableau stabilisé — {stable_rows} ligne(s) affichée(s)", "OK")
     col = table_column_map(driver)
     if col:
         log(f"   [OWNER] Colonnes détectées : {col}")
 
-    name_i = col.get("name", 0)
-    phone_i = col.get("phone", 3)
-    veh_i = col.get("vehicle_type")
-
     drivers: list[dict[str, str]] = []
-    rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-    log(f"   [OWNER] {len(rows)} ligne(s) brute(s) dans le tableau")
-
-    for row in rows:
+    seen: set[str] = set()
+    page_num = 1
+    while len(drivers) < top_n:
+        log(f"   [OWNER] Page {page_num} — {len(drivers)} chauffeur(s) déjà collecté(s)")
+        added = _parse_fleet_driver_rows(
+            driver,
+            col=col,
+            top_n=top_n,
+            drivers=drivers,
+            seen=seen,
+            visual=visual,
+        )
+        log(f"   [OWNER] Page {page_num} : +{added} chauffeur(s)")
         if len(drivers) >= top_n:
             break
-        if _is_placeholder_row(row):
-            continue
-        try:
-            cells = row.find_elements(By.TAG_NAME, "td")
-            name = _cell_text(cells, name_i)
-            if not name or len(name) < 2:
-                continue
-            phone = _cell_text(cells, phone_i)
-            if not normalize_phone(phone):
-                for idx in range(len(cells)):
-                    t = _cell_text(cells, idx)
-                    if normalize_phone(t):
-                        phone = t
-                        break
-            vehicle_type = _cell_text(cells, veh_i) if veh_i is not None else ""
-            row_txt = row.text or ""
-            status_i = col.get("status")
-            status_cell = _cell_text(cells, status_i) if status_i is not None else ""
-            if status_cell:
-                owner_status = status_cell
-            else:
-                owner_status = (
-                    "APPROUVÉ" if "APPROUV" in row_txt.upper()
-                    else "EN ATTENTE" if "ATTENTE" in row_txt.upper()
-                    else "DÉSAPPROUVÉ" if "DESAPPROUV" in row_txt.upper() or "DÉSAPPROUV" in row_txt
-                    else "?"
-                )
-            color, label = _owner_status_style(row_txt)
-            if visual:
-                highlight_row(driver, row, color, label[:12])
-            drivers.append(
-                {
-                    "name": name,
-                    "phone": phone,
-                    "vehicle_type": vehicle_type,
-                    "owner_status": owner_status,
-                    "scraped_at": datetime.now().isoformat(timespec="seconds"),
-                },
-            )
-            log(f"      → {name} | {phone or '-'} | {owner_status} | véh.={vehicle_type or '-'}")
-        except Exception as e:
-            log(f"   [OWNER] Ligne ignorée: {e}", "WARNING")
-            continue
+        if not _fleet_go_next_page(driver):
+            break
+        page_num += 1
+        wait_for_table(driver, timeout=20, min_rows=1)
+        time.sleep(1)
+
+    log(f"   [OWNER] {len(drivers)} ligne(s) brute(s) lues sur {page_num} page(s)")
 
     inject_banner(
         driver,
@@ -1600,7 +1742,12 @@ def main() -> None:
     parser.add_argument("--excel", help="DOSSIER_PARTENAIRES.xlsx (sinon campagne{N}@upjunoo.com)")
     parser.add_argument("--email-template", default=DEFAULT_EMAIL_TEMPLATE)
     parser.add_argument("--password", default=DEFAULT_PARTNER_PASSWORD)
-    parser.add_argument("--top", type=int, default=DRIVERS_TOP_N, help="Nb chauffeurs fleet-drivers")
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=DRIVERS_TOP_N,
+        help=f"Nb max chauffeurs fleet-drivers (défaut {DRIVERS_TOP_N}, pagination {FLEET_DRIVERS_PAGE_SIZE})",
+    )
     parser.add_argument("--headed", action="store_true", help="Navigateur visible")
     parser.add_argument("--loop", action="store_true", help="Boucle continue (temps réel)")
     parser.add_argument("--interval", type=int, default=120, help="Pause entre tours complets (s)")
@@ -1623,7 +1770,10 @@ def main() -> None:
         sys.exit(2)
 
     log("SWEEP PARTENAIRES WEB")
-    log(f"   Partenaires: {len(partners)} | top {args.top} chauffeurs/partenaire")
+    log(
+        f"   Partenaires: {len(partners)} | fleet-drivers pagination {FLEET_DRIVERS_PAGE_SIZE} "
+        f"| max {args.top} chauffeurs/partenaire",
+    )
     log(f"   Owner: {OWNER_LOGIN_URL}")
     log(f"   Fleet: {FLEET_DRIVERS_URL}")
     log(f"   Etat: {STATE_FILE}")

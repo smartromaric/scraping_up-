@@ -24,6 +24,7 @@ from partner_dashboard.config import (
     NIGHTLY_SCRIPT,
     ORCHESTRATOR_SCRIPT,
     OUTPUT_DIR,
+    PAYMENT_SYNC_SCRIPT,
     SCRIPT_DIR,
 )
 from partner_dashboard.metrics import find_best_export_json
@@ -162,9 +163,14 @@ class RunManager:
         job.campaign_total = total
         num = camp_num if camp_num is not None else slot_pos
         if job.kind == "orchestrator":
-            job.phase = "orchestrator"
-            job.phase_label = f"Orchestrateur — campagne {num} ({slot_pos}/{total})"
-            pct = int(slot_pos / total * 92)
+            if job.phase in ("payment_sync", "orchestrator_done"):
+                job.phase = "payment_sync"
+                job.phase_label = f"Sync paiements admin — campagne {num} ({slot_pos}/{total})"
+                pct = 82 + int(slot_pos / total * 16)
+            else:
+                job.phase = "orchestrator"
+                job.phase_label = f"Orchestrateur — campagne {num} ({slot_pos}/{total})"
+                pct = int(slot_pos / total * 80)
         elif job.kind == "nightly":
             job.phase = "export"
             job.phase_label = f"Export admin — campagne {slot_pos}/{total}"
@@ -208,6 +214,35 @@ class RunManager:
                         total=total,
                         camp_num=idx,
                     )
+            if "BILAN |" in line and job.phase != "payment_sync":
+                job.phase = "orchestrator_done"
+                job.phase_label = "Orchestrateur terminé — sync paiements…"
+                job.progress_pct = max(job.progress_pct, 82)
+
+        if job.kind in ("orchestrator", "payment_sync"):
+            if "SYNC HISTORIQUE PAIEMENTS" in line.upper():
+                job.phase = "payment_sync"
+                job.phase_label = "Sync historique paiements → state.json"
+                job.progress_pct = max(job.progress_pct, 84)
+            if "PARTENAIRE " in line and job.phase == "payment_sync":
+                pm = _PARTNER_START_RE.search(line)
+                if pm:
+                    idx = int(pm.group(1))
+                    total = job.campaign_total or max(
+                        1,
+                        job.campaign_end - job.campaign_start + 1,
+                    )
+                    slot_pos = idx - job.campaign_start + 1
+                    if 1 <= slot_pos <= total:
+                        self._set_campaign_progress(
+                            job,
+                            slot_pos=slot_pos,
+                            total=total,
+                            camp_num=idx,
+                        )
+            if "CROISEMENT RAPPORT" in line.upper():
+                job.phase_label = "Croisement paiements ↔ state.json"
+                job.progress_pct = max(job.progress_pct, 98)
 
         if "NIGHTLY REPORTS" in line.upper():
             job.phase = "nightly"
@@ -241,11 +276,12 @@ class RunManager:
             job.phase_label = "Terminé"
             job.progress_pct = 100
         if job.kind == "orchestrator" and (
-            "BILAN |" in line or re.search(r"Log:\s+.*orchestrator\.log", line, re.I)
+            re.search(r"Log:\s+.*orchestrator\.log", line, re.I)
         ):
-            job.phase = "done"
-            job.phase_label = "Orchestrateur terminé"
-            job.progress_pct = 100
+            if job.phase != "payment_sync":
+                job.phase = "orchestrator_done"
+                job.phase_label = "Orchestrateur terminé — sync paiements…"
+                job.progress_pct = max(job.progress_pct, 82)
 
         if job.kind == "godseye":
             if "Connexion admin" in line or "admin_login" in line.lower():
@@ -364,9 +400,10 @@ class RunManager:
             kind="orchestrator",
             script=ORCHESTRATOR_SCRIPT,
             extra=extra,
-            phase_label="Orchestrateur Selenium",
+            phase_label="Orchestrateur + sync paiements admin",
             campaign_start=start,
             campaign_end=end,
+            follow_scripts=[(PAYMENT_SYNC_SCRIPT, extra)],
         )
 
     def start_godseye_download(self, *, headed: bool = False) -> dict[str, Any]:
@@ -413,6 +450,7 @@ class RunManager:
         phase_label: str,
         campaign_start: int | None = None,
         campaign_end: int | None = None,
+        follow_scripts: list[tuple[Path, list[str]]] | None = None,
     ) -> dict[str, Any]:
         c_start, c_end, c_total = _parse_campaign_range(extra)
         if campaign_start is not None:
@@ -438,58 +476,80 @@ class RunManager:
         self._set_job(job)
 
         def runner() -> None:
-            cmd = [sys.executable, str(script), *extra]
-            self._append_log(job, f">>> {' '.join(cmd)}")
-            try:
-                env = os.environ.copy()
-                env.setdefault("PYTHONIOENCODING", "utf-8")
-                env.setdefault("PYTHONUTF8", "1")
-                popen_kw: dict[str, Any] = {
-                    "cwd": str(SCRIPT_DIR),
-                    "stdout": subprocess.PIPE,
-                    "stderr": subprocess.STDOUT,
-                    "text": True,
-                    "encoding": "utf-8",
-                    "errors": "replace",
-                    "bufsize": 1,
-                    "env": env,
-                }
-                if sys.platform != "win32":
-                    popen_kw["start_new_session"] = True
-                proc = subprocess.Popen(cmd, **popen_kw)
-                with self._lock:
-                    self._proc = proc
-                if proc.stdout:
-                    for line in proc.stdout:
-                        line = line.rstrip()
-                        if line:
-                            self._append_log(job, line)
-                            self._notify(job)
-                rc = proc.wait()
-                job.exit_code = rc
-                job.finished_at = datetime.now().isoformat(timespec="seconds")
+            scripts_to_run: list[tuple[Path, list[str]]] = [(script, extra)]
+            scripts_to_run.extend(follow_scripts or [])
+            final_rc = 0
+
+            for step_idx, (step_script, step_extra) in enumerate(scripts_to_run):
                 if job.status == "cancelled":
-                    pass
-                elif rc == 0:
-                    job.status = "completed"
-                    job.phase = "done"
-                    job.phase_label = "Terminé avec succès"
-                    job.progress_pct = 100
-                else:
+                    break
+                if step_idx > 0 and final_rc != 0:
+                    self._append_log(
+                        job,
+                        f"[SKIP] Étape suivante ignorée (code {final_rc})",
+                    )
+                    break
+                if step_idx > 0:
+                    job.phase = "payment_sync"
+                    job.phase_label = "Sync historique paiements → state.json"
+                    job.progress_pct = max(job.progress_pct, 84)
+                    self._notify(job)
+
+                cmd = [sys.executable, str(step_script), *step_extra]
+                self._append_log(job, f">>> {' '.join(cmd)}")
+                try:
+                    env = os.environ.copy()
+                    env.setdefault("PYTHONIOENCODING", "utf-8")
+                    env.setdefault("PYTHONUTF8", "1")
+                    popen_kw: dict[str, Any] = {
+                        "cwd": str(SCRIPT_DIR),
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.STDOUT,
+                        "text": True,
+                        "encoding": "utf-8",
+                        "errors": "replace",
+                        "bufsize": 1,
+                        "env": env,
+                    }
+                    if sys.platform != "win32":
+                        popen_kw["start_new_session"] = True
+                    proc = subprocess.Popen(cmd, **popen_kw)
+                    with self._lock:
+                        self._proc = proc
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            line = line.rstrip()
+                            if line:
+                                self._append_log(job, line)
+                                self._notify(job)
+                    final_rc = proc.wait()
+                except Exception as e:
+                    final_rc = 1
                     job.status = "failed"
-                    job.phase = "error"
-                    job.phase_label = f"Échec (code {rc})"
-                    job.error = f"Code de sortie {rc}"
-                self._notify(job)
-            except Exception as e:
+                    job.error = str(e)
+                    job.finished_at = datetime.now().isoformat(timespec="seconds")
+                    self._append_log(job, f"ERREUR: {e}")
+                    self._notify(job)
+                    break
+
+            job.exit_code = final_rc
+            job.finished_at = datetime.now().isoformat(timespec="seconds")
+            if job.status == "cancelled":
+                pass
+            elif final_rc == 0:
+                job.status = "completed"
+                job.phase = "done"
+                suffix = " + sync paiements" if follow_scripts else ""
+                job.phase_label = f"Terminé avec succès{suffix}"
+                job.progress_pct = 100
+            elif job.status != "failed":
                 job.status = "failed"
-                job.error = str(e)
-                job.finished_at = datetime.now().isoformat(timespec="seconds")
-                self._append_log(job, f"ERREUR: {e}")
-                self._notify(job)
-            finally:
-                with self._lock:
-                    self._proc = None
+                job.phase = "error"
+                job.phase_label = f"Échec (code {final_rc})"
+                job.error = f"Code de sortie {final_rc}"
+            self._notify(job)
+            with self._lock:
+                self._proc = None
 
         self._thread = threading.Thread(target=runner, daemon=True)
         self._thread.start()

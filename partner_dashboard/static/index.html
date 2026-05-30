@@ -44,6 +44,7 @@
       <button type="button" class="tab" data-tab="campaigns">Campagnes</button>
       <button type="button" class="tab" data-tab="runs">Exécution live <span id="tab-runs-badge" class="tab-badge" hidden>●</span></button>
       <button type="button" class="tab" data-tab="exports">Exports HTML</button>
+      <button type="button" class="tab" data-tab="recharges">Recharges F2000</button>
     </nav>
 
     <section id="panel-overview" class="panel active">
@@ -195,6 +196,91 @@
           Archiver tout l'historique
         </button>
         <ul id="list-chauffeurs-archives" style="list-style:none;font-size:14px;margin-top:12px"></ul>
+      </div>
+    </section>
+
+    <section id="panel-recharges" class="panel">
+      <div class="card">
+        <h2>Liste des <span class="gold">chauffeurs</span></h2>
+        <p id="recharges-list-hint" style="font-size:13px;color:var(--muted);margin-bottom:12px">
+          Source : <code>state.json</code> local.
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center">
+          <label style="font-size:13px;color:var(--muted)">Afficher</label>
+          <select id="recharges-view-filter" style="min-width:180px;padding:6px 8px">
+            <option value="to_recharge">À recharger</option>
+            <option value="all">Tous les chauffeurs</option>
+            <option value="actifs">Actifs (approved)</option>
+            <option value="non_assignes">Non assignés</option>
+            <option value="recharged">Déjà rechargés</option>
+          </select>
+          <label style="font-size:13px;color:var(--muted)">Campagne</label>
+          <select id="recharges-list-partner" style="min-width:200px;padding:6px 8px">
+            <option value="">Toutes</option>
+          </select>
+          <span id="recharges-list-count" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+        <div id="recharges-summary" class="kpi-grid" style="margin-bottom:16px"></div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;align-items:center">
+          <button type="button" class="btn btn-outline" id="btn-recharges-refresh">Actualiser liste</button>
+          <a class="btn btn-primary" id="link-recharges-csv" href="/api/recharges/export-csv" download style="text-decoration:none">
+            Export CSV Appium
+          </a>
+          <a class="btn btn-outline-dark" id="link-recharges-export-state" href="/api/recharges/export-state" download style="text-decoration:none">
+            Exporter state.json
+          </a>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center">
+          <label style="font-size:13px;color:var(--muted)">Partenaire</label>
+          <select id="recharges-partner-select" style="min-width:200px;padding:6px 8px">
+            <option value="">— Choisir —</option>
+          </select>
+          <button type="button" class="btn btn-outline-dark btn-sm" id="btn-recharges-mark-partner">
+            Marquer tout le partenaire (à recharger)
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-recharges-mark-selected" disabled>
+            Marquer la sélection
+          </button>
+        </div>
+        <div style="overflow-x:auto;max-height:420px;overflow-y:auto">
+          <table class="data-table" id="table-recharges">
+            <thead>
+              <tr>
+                <th style="width:36px"><input type="checkbox" id="recharges-select-all" title="Tout sélectionner" /></th>
+                <th>Camp.</th>
+                <th>Chauffeur</th>
+                <th>Téléphone</th>
+                <th>Plaque</th>
+                <th>Statut</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h2>Comparer / mettre à jour <span class="gold">state.json</span></h2>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Importez un export state : <code>state.json</code>, <code>state (1).json</code>,
+          <code>state_20260529_143052.json</code> (export horodaté), etc. Comparaison puis fusion
+          dans le fichier local — les recharges déjà marquées sont conservées.
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px">
+          <input
+            type="file"
+            id="recharges-state-file"
+            accept=".json,application/json"
+            title="state.json, state (1).json, state_20260529_143052.json…"
+          />
+          <button type="button" class="btn btn-outline-dark" id="btn-recharges-compare">Comparer</button>
+          <button type="button" class="btn btn-primary" id="btn-recharges-apply" disabled>
+            Appliquer au state local
+          </button>
+        </div>
+        <div id="recharges-compare-box" style="font-size:13px;color:var(--muted)"></div>
+        <div id="recharges-compare-detail" style="margin-top:12px;font-size:13px"></div>
       </div>
     </section>
   </main>

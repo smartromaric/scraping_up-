@@ -16,6 +16,7 @@ SCHEDULER_STATE_FILE = DASHBOARD_DIR / "scheduler_state.json"
 
 NIGHTLY_SCRIPT = SCRIPT_DIR / "nightly_reports_runner.py"
 ORCHESTRATOR_SCRIPT = SCRIPT_DIR / "partner_fleet_orchestrator.py"
+PAYMENT_SYNC_SCRIPT = SCRIPT_DIR / "sync_payment_history_state.py"
 ACTIVATION_SCRIPT = SCRIPT_DIR / "generate_activation_report.py"
 EXPORT_SCRIPT = SCRIPT_DIR / "export_partner_fleet_drivers_report.py"
 DOWNLOAD_GODSEYE_SCRIPT = SCRIPT_DIR / "download_vehicules_en_ligne.py"

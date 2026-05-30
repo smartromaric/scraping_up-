@@ -1,0 +1,18 @@
+[Unit]
+Description=UPJUNOO Partner Dashboard (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/scraping_up-
+EnvironmentFile=-/opt/scraping_up-/.env
+Environment=PARTNER_DASHBOARD_HOST=0.0.0.0
+Environment=PARTNER_DASHBOARD_PORT=8770
+ExecStart=/opt/scraping_up-/.venv/bin/python run_partner_dashboard.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -50,9 +50,48 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove("visible"), 5000);
 }
 
+async function copyPhoneToClipboard(phone) {
+  const text = (phone || "").trim();
+  if (!text) {
+    showToast("Numéro vide");
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(`Numéro copié : ${text}`);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      showToast(`Numéro copié : ${text}`);
+      return true;
+    } catch {
+      showToast("Impossible de copier le numéro");
+      return false;
+    }
+  }
+}
+
+function renderPhoneCell(d) {
+  const phone = (d.phone || "").trim();
+  if (!phone) return "—";
+  const attr = phone.replace(/"/g, "&quot;");
+  return `<span class="phone-cell">
+    <span class="phone-cell-num">${escapeHtml(phone)}</span>
+    <button type="button" class="btn-copy-phone" data-phone="${attr}" title="Copier le numéro">Copier</button>
+  </span>`;
+}
+
 const JOB_KIND_LABELS = {
   nightly: "Rapports du soir",
-  orchestrator: "Orchestrateur",
+  orchestrator: "Orchestrateur + sync paiements",
   activation: "Génération HTML",
   godseye: "Godseye (conducteurs en ligne)",
   zip: "Archives ZIP",
@@ -603,6 +642,378 @@ async function startRun(endpoint, body) {
 function switchTab(name) {
   $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   $$(".panel").forEach((p) => p.classList.toggle("active", p.id === `panel-${name}`));
+  if (name === "recharges") loadRechargesList();
+}
+
+let lastRechargeCompare = null;
+let lastRechargesDrivers = [];
+
+function updateMarkSelectedButton() {
+  const btn = $("#btn-recharges-mark-selected");
+  if (!btn) return;
+  const n = $$("#table-recharges tbody input.recharge-row-cb:checked").length;
+  btn.disabled = n === 0;
+  btn.textContent = n > 0 ? `Marquer la sélection (${n})` : "Marquer la sélection";
+}
+
+function rechargeListQuery() {
+  const view = $("#recharges-view-filter")?.value || "to_recharge";
+  const partner = $("#recharges-list-partner")?.value || "";
+  const params = new URLSearchParams({ view });
+  if (partner) params.set("partner_index", partner);
+  return params.toString();
+}
+
+function statusLabel(status, row) {
+  const map = {
+    to_recharge: '<span style="color:#b8860b">À recharger</span>',
+    recharged: '<span style="color:#2e7d32">Rechargé</span>',
+    invalid_phone: '<span style="color:#c62828">Tél. invalide</span>',
+    pending: '<span style="color:var(--muted)">En attente</span>',
+    unassigned: '<span style="color:#c62828">Non assigné</span>',
+    not_on_fleet: '<span style="color:#ef6c00">Absent table flotte</span>',
+    pending_assignment: '<span style="color:#ef6c00">Assigné — en attente</span>',
+    other: '<span style="color:var(--muted)">—</span>',
+  };
+  if (row?.admin_reason_label && (status === "unassigned" || status === "not_on_fleet" || status === "pending_assignment")) {
+    const color = status === "not_on_fleet" || status === "pending_assignment" ? "#ef6c00" : "#c62828";
+    return `<span style="color:${color}">${escapeHtml(row.admin_reason_label)}</span>`;
+  }
+  return map[status] || escapeHtml(row?.admin_reason_label || status || "");
+}
+
+function renderPartnersPendingSelect(partners) {
+  const sel = $("#recharges-partner-select");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML =
+    '<option value="">— Choisir —</option>' +
+    (partners || [])
+      .map(
+        (p) =>
+          `<option value="${p.partner_index}">P${String(p.partner_index).padStart(2, "0")} — ${escapeHtml(p.partner_name || "")} (${p.pending} à recharger)</option>`,
+      )
+      .join("");
+  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
+function renderListPartnerSelect(partners) {
+  const sel = $("#recharges-list-partner");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML =
+    '<option value="">Toutes</option>' +
+    (partners || [])
+      .map(
+        (p) =>
+          `<option value="${p.partner_index}">P${String(p.partner_index).padStart(2, "0")} — ${escapeHtml(p.partner_name || "")} (${p.drivers_total})</option>`,
+      )
+      .join("");
+  if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
+function updateRechargesListHint(view, count) {
+  const hint = $("#recharges-list-hint");
+  const cnt = $("#recharges-list-count");
+  const labels = {
+    to_recharge: "Chauffeurs approved non encore rechargés (éligibles Appium).",
+    all: "Tous les chauffeurs enregistrés dans state.json.",
+    actifs: "Chauffeurs avec admin.reason = assigned_approved.",
+    non_assignes: "Chauffeurs sans assignation approuvée (pas assigned_approved).",
+    recharged: "Chauffeurs approved déjà marqués rechargés.",
+  };
+  if (hint) hint.textContent = labels[view] || labels.to_recharge;
+  if (cnt) cnt.textContent = count != null ? `${count} ligne(s)` : "";
+}
+
+function renderRechargesSummary(summary) {
+  const box = $("#recharges-summary");
+  if (!box || !summary) return;
+  const s = summary;
+  box.innerHTML = `
+    <div class="kpi"><div class="val">${s.drivers_total ?? 0}</div><div class="lbl">Total chauffeurs</div></div>
+    <div class="kpi"><div class="val">${s.actifs ?? 0}</div><div class="lbl">Actifs (approved)</div></div>
+    <div class="kpi"><div class="val">${s.non_assignes ?? 0}</div><div class="lbl">Non assignés</div></div>
+    <div class="kpi gold-top"><div class="val">${s.a_recharger ?? 0}</div><div class="lbl">À recharger</div></div>
+    <div class="kpi"><div class="val">${s.recharges ?? 0}</div><div class="lbl">Déjà rechargés</div></div>
+    <div class="kpi"><div class="val">${s.invalid_phone ?? 0}</div><div class="lbl">Tél. invalides</div></div>
+  `;
+}
+
+function renderRechargesTable(drivers, view) {
+  const tbody = $("#table-recharges tbody");
+  if (!tbody) return;
+  const showCheckboxes = view === "to_recharge";
+  lastRechargesDrivers = drivers || [];
+  const selectAll = $("#recharges-select-all");
+  const thCb = selectAll?.closest("th");
+  if (selectAll) {
+    selectAll.checked = false;
+    selectAll.disabled = !showCheckboxes;
+  }
+  if (thCb) thCb.style.visibility = showCheckboxes ? "visible" : "hidden";
+  const markSel = $("#btn-recharges-mark-selected");
+  if (markSel) markSel.style.display = showCheckboxes ? "" : "none";
+  if (!drivers?.length) {
+    const total = window._lastRechargesSummary?.drivers_total ?? 0;
+    let msg = "Aucun chauffeur pour ce filtre.";
+    if (view === "to_recharge" && total > 0) {
+      msg = `Aucun à recharger (${total} chauffeur(s) au total — choisissez « Tous les chauffeurs »).`;
+    } else if (view !== "to_recharge" && total > 0 && !window._rechargesApiHasView) {
+      msg = `Liste vide : redémarrez le dashboard (Ctrl+F5). ${total} chauffeur(s) dans state.json.`;
+    }
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted)">${msg}</td></tr>`;
+    updateMarkSelectedButton();
+    return;
+  }
+  tbody.innerHTML = drivers
+    .map((d) => {
+      const note = d.phone_invalid && d.status !== "invalid_phone"
+        ? '<span style="color:#c62828">numéro invalide</span>'
+        : "";
+      const key = escapeHtml(d.match_key || "");
+      const canMark = showCheckboxes && d.status === "to_recharge";
+      const cb = canMark
+        ? `<input type="checkbox" class="recharge-row-cb" value="${key}" />`
+        : "";
+      return `<tr data-match-key="${key}">
+        <td>${cb}</td>
+        <td>P${String(d.partner_index).padStart(2, "0")}</td>
+        <td>${escapeHtml(d.name)}</td>
+        <td>${renderPhoneCell(d)}</td>
+        <td>${escapeHtml(d.plate)}</td>
+        <td>${statusLabel(d.status, d)}</td>
+        <td>${note}</td>
+      </tr>`;
+    })
+    .join("");
+  $$("#table-recharges tbody input.recharge-row-cb").forEach((cb) => {
+    cb.addEventListener("change", updateMarkSelectedButton);
+  });
+  updateMarkSelectedButton();
+}
+
+async function loadRechargesList() {
+  try {
+    const view = $("#recharges-view-filter")?.value || "to_recharge";
+    const res = await fetch(`/api/recharges?${rechargeListQuery()}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    window._lastRechargesSummary = data.summary;
+    window._rechargesApiHasView = data.view != null;
+    renderRechargesSummary(data.summary);
+    renderPartnersPendingSelect(data.partners_pending);
+    renderListPartnerSelect(data.partners);
+    renderRechargesTable(data.drivers, data.view || view);
+    updateRechargesListHint(data.view || view, data.drivers_count);
+    const link = $("#link-recharges-export-state");
+    if (link && data.export_filename_example) {
+      link.setAttribute("download", data.export_filename_example);
+    }
+  } catch (e) {
+    showToast("Recharges : " + e.message);
+  }
+}
+
+async function markRechargesSelected() {
+  const keys = [...$$("#table-recharges tbody input.recharge-row-cb:checked")]
+    .map((cb) => cb.closest("tr")?.dataset.matchKey || cb.value)
+    .filter(Boolean);
+  if (!keys.length) {
+    showToast("Sélectionnez au moins un chauffeur");
+    return;
+  }
+  if (!confirm(`Marquer ${keys.length} chauffeur(s) comme rechargé(s) ?`)) return;
+  const btn = $("#btn-recharges-mark-selected");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/recharges/mark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ match_keys: keys }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || `HTTP ${res.status}`;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    await loadRechargesList();
+    showToast(`${data.marked_count} chauffeur(s) marqué(s) rechargé(s)`);
+  } catch (e) {
+    showToast("Marquage : " + e.message);
+  } finally {
+    updateMarkSelectedButton();
+  }
+}
+
+async function markRechargesPartner() {
+  const sel = $("#recharges-partner-select");
+  const partnerIndex = sel?.value ? parseInt(sel.value, 10) : NaN;
+  if (!partnerIndex || Number.isNaN(partnerIndex)) {
+    showToast("Choisissez un partenaire");
+    return;
+  }
+  const label = sel.options[sel.selectedIndex]?.text || `P${partnerIndex}`;
+  if (
+    !confirm(
+      `Marquer tous les chauffeurs « à recharger » du partenaire ${label} comme rechargés ?`,
+    )
+  ) {
+    return;
+  }
+  const btn = $("#btn-recharges-mark-partner");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/recharges/mark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        partner_index: partnerIndex,
+        all_pending_in_partner: true,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || `HTTP ${res.status}`;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    await loadRechargesList();
+    showToast(`${data.marked_count} chauffeur(s) marqué(s) pour ${label}`);
+  } catch (e) {
+    showToast("Marquage partenaire : " + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderCompareResult(data) {
+  const box = $("#recharges-compare-box");
+  const detail = $("#recharges-compare-detail");
+  if (!box) return;
+  const sc = data.summary_current || {};
+  const su = data.summary_uploaded || {};
+  box.innerHTML = `
+    <p><strong>Fichier :</strong> ${escapeHtml(data.uploaded_filename || "")}</p>
+    <p><strong>State local</strong> — actifs ${sc.actifs}, rechargés ${sc.recharges}, à recharger <strong>${sc.a_recharger}</strong></p>
+    <p><strong>State uploadé</strong> — actifs ${su.actifs}, rechargés ${su.recharges}, à recharger <strong>${su.a_recharger}</strong></p>
+    <p>Devenus rechargés dans l'upload : <strong>${(data.became_recharged_in_upload || []).length}</strong>
+    · Uniquement local à recharger : <strong>${(data.only_current_recharge || []).length}</strong>
+    · Uniquement upload à recharger : <strong>${(data.only_uploaded_recharge || []).length}</strong>
+    · Écarts détectés : <strong>${data.diff_count ?? 0}</strong></p>
+  `;
+  if (!detail) return;
+  const parts = [];
+  if (data.became_recharged_in_upload?.length) {
+    parts.push(
+      "<h4 style='margin:12px 0 6px'>Nouveaux rechargés (upload vs local)</h4><ul>" +
+        data.became_recharged_in_upload
+          .map(
+            (r) =>
+              `<li>P${String(r.partner_index).padStart(2, "0")} ${escapeHtml(r.name)}</li>`,
+          )
+          .join("") +
+        "</ul>",
+    );
+  }
+  if (data.only_current_recharge?.length) {
+    parts.push(
+      "<h4 style='margin:12px 0 6px'>À recharger seulement dans le state local</h4><ul>" +
+        data.only_current_recharge
+          .slice(0, 30)
+          .map(
+            (r) =>
+              `<li>P${String(r.partner_index).padStart(2, "0")} ${escapeHtml(r.name)} — ${escapeHtml(r.phone)}</li>`,
+          )
+          .join("") +
+        (data.only_current_recharge.length > 30 ? "<li>…</li>" : "") +
+        "</ul>",
+    );
+  }
+  if (data.only_uploaded_recharge?.length) {
+    parts.push(
+      "<h4 style='margin:12px 0 6px'>À recharger seulement dans l'upload</h4><ul>" +
+        data.only_uploaded_recharge
+          .slice(0, 30)
+          .map(
+            (r) =>
+              `<li>P${String(r.partner_index).padStart(2, "0")} ${escapeHtml(r.name)} — ${escapeHtml(r.phone)}</li>`,
+          )
+          .join("") +
+        (data.only_uploaded_recharge.length > 30 ? "<li>…</li>" : "") +
+        "</ul>",
+    );
+  }
+  detail.innerHTML = parts.join("") || "<p>Aucun écart notable sur la liste à recharger.</p>";
+}
+
+async function compareRechargesState() {
+  const input = $("#recharges-state-file");
+  const file = input?.files?.[0];
+  if (!file) {
+    showToast("Choisissez un fichier (state.json, state (1).json…)");
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const btn = $("#btn-recharges-compare");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/recharges/compare", { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || `HTTP ${res.status}`;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    lastRechargeCompare = data;
+    renderCompareResult(data);
+    const applyBtn = $("#btn-recharges-apply");
+    if (applyBtn) applyBtn.disabled = false;
+    showToast("Comparaison terminée");
+  } catch (e) {
+    showToast("Comparaison : " + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function applyRechargesState() {
+  const input = $("#recharges-state-file");
+  const file = input?.files?.[0];
+  if (!file) {
+    showToast("Choisissez un fichier (state.json, state (1).json…)");
+    return;
+  }
+  if (
+    !confirm(
+      `Fusionner « ${file.name} » dans le state local ?\nUne sauvegarde sera créée. Les recharges déjà marquées sont conservées.`,
+    )
+  ) {
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const btn = $("#btn-recharges-apply");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/recharges/apply", { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || `HTTP ${res.status}`;
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    await loadRechargesList();
+    showToast(
+      `« ${data.uploaded_filename || file.name} » fusionné — ${data.summary?.a_recharger ?? 0} à recharger`,
+    );
+    lastRechargeCompare = null;
+    $("#recharges-compare-detail").innerHTML = "";
+    $("#recharges-compare-box").innerHTML =
+      "<p style='color:var(--muted)'>Fusion appliquée. Relancez une comparaison si besoin.</p>";
+  } catch (e) {
+    showToast("Fusion : " + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function loadScheduler() {
@@ -649,7 +1060,32 @@ function bindEvents() {
     loadDashboard();
     loadHtmlList();
     loadChauffeursActifsStatus();
+    loadRechargesList();
     pollCurrentRun();
+  });
+
+  $("#btn-recharges-refresh")?.addEventListener("click", loadRechargesList);
+  $("#table-recharges tbody")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".btn-copy-phone");
+    if (!btn) return;
+    e.preventDefault();
+    copyPhoneToClipboard(btn.dataset.phone || "");
+  });
+  $("#recharges-view-filter")?.addEventListener("change", loadRechargesList);
+  $("#recharges-list-partner")?.addEventListener("change", loadRechargesList);
+  $("#btn-recharges-compare")?.addEventListener("click", compareRechargesState);
+  $("#btn-recharges-apply")?.addEventListener("click", applyRechargesState);
+  $("#btn-recharges-mark-selected")?.addEventListener("click", markRechargesSelected);
+  $("#btn-recharges-mark-partner")?.addEventListener("click", markRechargesPartner);
+  $("#recharges-select-all")?.addEventListener("change", (e) => {
+    const checked = e.target.checked;
+    $$("#table-recharges tbody input.recharge-row-cb").forEach((cb) => {
+      cb.checked = checked;
+    });
+    updateMarkSelectedButton();
+  });
+  $("#link-recharges-export-state")?.addEventListener("click", () => {
+    setTimeout(loadRechargesList, 1500);
   });
 
   $("#btn-godseye-download")?.addEventListener("click", () =>
@@ -723,6 +1159,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadDashboard();
   loadHtmlList();
   loadChauffeursActifsStatus();
+  loadRechargesList();
   loadScheduler();
   connectSSE();
   pollCurrentRun();
